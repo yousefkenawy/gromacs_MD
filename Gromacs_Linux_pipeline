@@ -1,0 +1,153 @@
+step One: Prepare the Protein Topology
+
+grep ligand protein.pdb > ligand.pdb
+
+grep -v HETATM protein.pdb > protein_processed.pdb
+
+gmx pdb2gmx -f protein_processed.pdb -o protein_processed.gro -ter
+
+•For this tutorial, choose the CHARMM36 force field (option 1) Choose the default water model then (CHARMM-modified TIP3P) 
+•choose "NH3+" 
+•"COO-" for the termini.
+
+Step Two: Prepare the Ligand Topology
+
+1- sudo apt install openbabel
+ 2- obabel ligand.pdb -O ligand.mol2 -h
+# Several corrections must be made to ligand.mol2 before it can be used
+The first change that needs to be made is in the MOLECULE heading. Replace "*****" with "ligand,"
+fix the residue names and numbers such that they are all the same
+
+perl sort_mol2_bonds.pl ligand.mol2 ligand_fix.mol2
+
+Generate the ligand Topology with CGenFF
+https://cgenff.silcsbio.com/
+
+python3 cgenff_charmm2gmx.py ligand ligand_fix.mol2 ligand.str charmm36-jul2022.ff
+
+Build the Complex
+
+gmx editconf -f ligand_ini.pdb -o ligand.gro	
+
+•	Copy protein_processed.gro to a new file call it "complex.gro"
+•	copy the coordinate section of ligand.gro and paste it into complex.gro, below the last line of the protein atoms, and before the box vectors
+
+Build the Topology
+Just insert a line that says #include "ligand.itp" into topol.top after the position restraint file is included. The inclusion of position restraints indicates the end of the "Protein" moleculetype section
+
+; Include ligand topology
+#include "ligand.itp"
+
+At the TOP of topol.top, insert an #include statement to add these parameters
+
+; Include ligand parameters
+#include "ligand.prm"
+
+The last adjustment to be made is in the [ molecules ] directive. To account for the fact that there is a new molecule in complex.gro, we have to add it here
+; Compound        #mols
+Protein_chain_A     1
+ligand                              1
+
+Step Three: Defining the Unit Cell & Adding Solvent
+gmx editconf -f complex.gro -o newbox.gro -bt dodecahedron -d 1.0
+gmx solvate -cp newbox.gro -cs spc216.gro -p topol.top -o solv.gro
+Step Four: Adding Ions
+gmx grompp -f ions.mdp -c solv.gro -p topol.top -o ions.tpr
+gmx genion -s ions.tpr -o solv_ions.gro -p topol.top -pname NA -nname CL -neutral
+
+Step Five: Energy Minimization
+gmx grompp -f em.mdp -c solv_ions.gro -p topol.top -o em.tpr
+gmx mdrun -v -deffnm em
+
+Restraining the Ligand
+gmx make_ndx -f ligand.gro -o index_ligand.ndx
+ > 0 & ! a H*
+ > q
+gmx genrestr -f ligand.gro -n index_ligand.ndx -o posre_ligand.itp -fc 1000 1000 1000
+#choose 3
+Now, we need to include this information in our topology (topol.top)
+; Include ligand topology
+#include "ligand.itp"
+; Ligand position restraints
+#ifdef POSRES
+#include "posre_ligand.itp"
+#endif
+; Include water topology
+#include "./charmm36-jul2022.ff/tip3p.itp"
+
+gmx make_ndx -f em.gro -o index.ndx
+
+Merge the "Protein" and "ligand" groups with the following, where ">" indicates the make_ndx prompt:
+> 1 | 13
+> 15 | 14
+> q
+gmx grompp -f nvt.mdp -c em.gro -r em.gro -p topol.top -n index.ndx -o nvt.tpr
+gmx mdrun -deffnm nvt
+
+gmx grompp -f npt.mdp -c nvt.gro -t nvt.cpt -r nvt.gro -p topol.top -n index.ndx -o npt.tpr
+gmx mdrun -deffnm npt
+
+Step six: Production MD
+gmx grompp -f md.mdp -c npt.gro -t npt.cpt -p topol.top -n index.ndx -o md.tpr
+gmx mdrun -deffnm md
+
+Recentering and Rewrapping Coordinates
+gmx trjconv -s md.tpr -f md.xtc -o md_center.xtc -center -pbc mol -ur compact
+
+Choose "Protein" for centering and "System" for output
+
+gmx trjconv -s md.tpr -f md_center.xtc -o start.pdb -dump 0
+
+
+For even smoother visualization, it may be beneficial to perform rotational and translational fitting. Execute trjconv as follows:
+gmx trjconv -s md.tpr -f md_center.xtc -o md_fit.xtc -fit rot+trans
+Choose "Backbone" to perform least-squares fitting to the protein backbone, and "System" for output
+------RMSD Calculations-----
+gmx rms -s md.tpr -f md_fit.xtc -o rmsd.xvg  
+#this code gives rmsd calculations in picosecond
+#select “protein” for least squares fit and “ligand” for RMSD calculation (in our case it is ligand)
+# to visualize the outputs we must install first xmgrace tool 
+sudo apt install grace
+# to visualize rmsd.xvg
+xmgrace rmsd.xvg  
+
+gmx rms -s md.tpr -f md_fit.xtc -o rmsd.xvg -tu ns
+#select “protein” for least squares fit and “ligand” for RMSD calculation (in our case it is ligand)
+1
+13
+#this is for ligand
+You can also create different rmsd files for backbone for example using same code but choose 
+1 
+4
+xmgrace rmsd.xvg  
+#(Select appropritate 2 options one by one and then open the output files in Grace) Select Backbone and then LIG
+
+
+
+
+------RMSF Calculations-----
+
+gmx rmsf -s md.tpr -f md_fit.xtc -o rmsf.xvg
+4
+(Select appropritate Backbone open the output files in Grace)
+xmgrace output.xvg
+
+
+
+-----------h-bonds-------------------
+
+gmx hbond -s md.tpr -f md_fit.xtc -num hb.xvg -tu ns
+1
+13
+xmgrace hb.xvg
+
+--------------Gyration Radius------------------
+gmx gyrate -s md.tpr -f md_fit.xtc -o gyrate1.xvg 
+#Choose the group of your choice (1)
+xmgrace gyrate1.xvg
+
+-------------ENERGY Calculations---------------
+gmx energy -f md.edr -o energy1.xvg
+#Choose the option of your choice (47 T-protein_lig) & (49 Lamb-protein_lig)
+# press enter 2 times to proceed
+xmgrace -nxy energy1.xvg
